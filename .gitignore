@@ -1,0 +1,17 @@
+# ESP-IDF Build directory
+build/
+
+# ESP-IDF Configuration backups
+sdkconfig.old
+
+# Component Manager (if used)
+dependencies.lock
+managed_components/
+
+# Python / Scripts artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE specific (optional, uncomment if you don't want to commit VSCode settings)
+# .vscode/
