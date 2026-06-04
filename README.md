@@ -2,6 +2,16 @@
 
 Bu proje, ESP32 (LilyGO TTGO T-Beam) kullanılarak geliştirilmiş bir alev (yangın) algılama sistemidir. Ortamda alev tespit edildiğinde hem sesli (buzzer) hem de görsel (OLED ekran) olarak uyarı verir.
 
+## 📸 Görseller ve Demo
+
+<!-- Github'a yüklediğiniz resmin veya videonun linkini aşağıdaki ilgili yerlere yapıştırabilirsiniz -->
+
+**Proje Fotoğrafı:**
+![Proje Görseli](picture.jpeg)
+
+**Demo Videosu:**
+[🎬 Projenin Çalışma Videosunu İzlemek İçin Tıklayın](video.mp4)
+
 ## 🚀 Özellikler
 
 - **Gerçek Zamanlı Alev Algılama**: Alev sensörü ile ortamdaki ateş ve alevleri hızlıca tespit eder.
