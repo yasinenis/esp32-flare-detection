@@ -4,13 +4,11 @@ Bu proje, ESP32 (LilyGO TTGO T-Beam) kullanılarak geliştirilmiş bir alev (yan
 
 ## 📸 Görseller ve Demo
 
-<!-- Github'a yüklediğiniz resmin veya videonun linkini aşağıdaki ilgili yerlere yapıştırabilirsiniz -->
-
 **Proje Fotoğrafı:**
-![Proje Görseli](picture.jpeg)
+<img width="2040" height="1536" alt="picture" src="https://github.com/user-attachments/assets/218d510d-bbd4-4884-bc74-82b50e9d5d67" />
 
 **Demo Videosu:**
-[🎬 Projenin Çalışma Videosunu İzlemek İçin Tıklayın](video.mp4)
+[🎬 Projenin Çalışma Videosunu İzlemek İçin Tıklayın](https://github.com/user-attachments/assets/5106c5d3-cd30-4685-98a4-474bc7f61504)
 
 ## 🚀 Özellikler
 
