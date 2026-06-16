@@ -42,8 +42,12 @@ const Charts = (() => {
   }
 
   /** Alarmları zaman kovalarına böler (grafik 1). */
-  function bucketize(alarms, range) {
-    const now = Date.now() / 1000;
+  function bucketize(alarms, range, refNowSec) {
+    // Cihazın saati (NTP) tarayıcının saatiyle senkron olmayabilir; "şimdi" referansı
+    // olarak mümkünse cihazın kendi son bildirdiği zaman damgası kullanılır, böylece
+    // alarm zaman damgalarıyla aynı saat ekseninde kalır (aksi halde kova aralığının
+    // dışında kalıp grafikte hiç görünmeyebilirler).
+    const now = refNowSec || Date.now() / 1000;
     // [kova sayısı, kova genişliği(sn), tarihli etiket mi]
     const cfg = {
       '1h':  [12, 300,    false], // 12 x 5dk
@@ -162,9 +166,9 @@ const Charts = (() => {
   }
 
   /* ----------------------------- Güncelleme ------------------------------ */
-  function renderAlarmCount(alarms, range) {
+  function renderAlarmCount(alarms, range, refNowSec) {
     if (!alarmCountChart) return;
-    const { labels, buckets } = bucketize(alarms, range);
+    const { labels, buckets } = bucketize(alarms, range, refNowSec);
     alarmCountChart.data.labels = labels;
     alarmCountChart.data.datasets[0].data = buckets;
     alarmCountChart.data.datasets[0].label = t('alarms');

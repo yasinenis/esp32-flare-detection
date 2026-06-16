@@ -24,7 +24,7 @@ const CONFIG = {
   //   'websocket' seçiliyse ve bağlantı kurulamazsa, otomatik olarak
   //   'http' polling'e (her CONFIG.http.pollIntervalMs ms) DÜŞER (fallback).
   // ==========================================================================
-  primaryTransport: 'websocket',
+  primaryTransport: "websocket",
 
   // ==========================================================================
   // 3) WEBSOCKET (birincil) — ESP32 üzerindeki WS sunucusu
@@ -34,8 +34,8 @@ const CONFIG = {
   //   Dashboard komutları aynı soket üzerinden {type:'command', ...} olarak yollar.
   // ==========================================================================
   websocket: {
-    url: 'ws://192.168.1.50/ws', // <-- ESP32'nizin IP'si ile değiştirin
-    reconnectDelayMs: 3000,      // bağlantı koparsa kaç ms sonra tekrar denesin
+    url: "ws://10.238.148.239/ws", // <-- ESP32'nizin IP'si ile değiştirin
+    reconnectDelayMs: 3000, // bağlantı koparsa kaç ms sonra tekrar denesin
   },
 
   // ==========================================================================
@@ -47,11 +47,11 @@ const CONFIG = {
   //     flare/device/{deviceId}/command  (dashboard -> cihaz)   [publish edilir]
   // ==========================================================================
   mqtt: {
-    brokerUrl: 'ws://broker.hivemq.com:8000/mqtt',       // WS/WSS broker adresi
-    statusTopic: 'flare/device/+/status',                // + = tüm cihazlar
-    commandTopicTemplate: 'flare/device/{deviceId}/command',
-    username: '',                                         // gerekiyorsa doldurun
-    password: '',                                         // gerekiyorsa doldurun
+    brokerUrl: "ws://broker.hivemq.com:8000/mqtt", // WS/WSS broker adresi
+    statusTopic: "flare/device/+/status", // + = tüm cihazlar
+    commandTopicTemplate: "flare/device/{deviceId}/command",
+    username: "", // gerekiyorsa doldurun
+    password: "", // gerekiyorsa doldurun
   },
 
   // ==========================================================================
@@ -64,8 +64,8 @@ const CONFIG = {
   //     POST {baseUrl}/api/command           -> uzaktan komut  {deviceId, command}
   // ==========================================================================
   http: {
-    baseUrl: 'http://192.168.1.50', // <-- ESP32/backend kök adresi
-    pollIntervalMs: 2000,           // polling sıklığı (ms) — varsayılan 2 sn
+    baseUrl: "http://10.238.148.239", // <-- ESP32/backend kök adresi
+    pollIntervalMs: 2000, // polling sıklığı (ms) — varsayılan 2 sn
   },
 
   // ==========================================================================
@@ -82,7 +82,7 @@ const CONFIG = {
   //   Yeni cihaz eklemek için listeye {id, name} ekleyin.
   // ==========================================================================
   devices: [
-    { id: 'tbeam-01', name: 'T-Beam #1' },
+    { id: "tbeam-01", name: "T-Beam #1" },
     // { id: 'tbeam-02', name: 'T-Beam #2 (Mutfak)' },
   ],
 
@@ -90,13 +90,13 @@ const CONFIG = {
   // 8) ARAYÜZ VARSAYILANLARI
   // ==========================================================================
   defaults: {
-    theme: 'dark',                 // 'dark' | 'light' (varsayılan dark)
-    language: 'tr',                // 'tr' | 'en'
-    soundEnabled: true,            // sesli alarm açık mı
-    soundVolume: 0.7,              // 0.0 .. 1.0
-    notificationsEnabled: false,   // tarayıcı bildirimi (izin verilince aktif olur)
-    lowBatteryThreshold: 20,       // bu %'nin altında kırmızı uyarı
-    telemetryHistoryLength: 900,   // trend grafiği için tutulacak örnek sayısı
+    theme: "dark", // 'dark' | 'light' (varsayılan dark)
+    language: "tr", // 'tr' | 'en'
+    soundEnabled: true, // sesli alarm açık mı
+    soundVolume: 0.7, // 0.0 .. 1.0
+    notificationsEnabled: false, // tarayıcı bildirimi (izin verilince aktif olur)
+    lowBatteryThreshold: 20, // bu %'nin altında kırmızı uyarı
+    telemetryHistoryLength: 900, // trend grafiği için tutulacak örnek sayısı
   },
 
   // ==========================================================================
@@ -108,8 +108,8 @@ const CONFIG = {
   //   yer tutucudur — gerçek gönderimi kendi sunucunuzda gerçekleştirin.
   // ==========================================================================
   integrations: {
-    telegram: { botToken: '', chatId: '' }, // TODO(backend): bot ile alarm gönder
-    email: { to: '' },                      // TODO(backend): e-posta ile alarm gönder
+    telegram: { botToken: "", chatId: "" }, // TODO(backend): bot ile alarm gönder
+    email: { to: "" }, // TODO(backend): e-posta ile alarm gönder
   },
 };
 

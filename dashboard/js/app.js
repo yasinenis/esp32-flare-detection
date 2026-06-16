@@ -290,7 +290,9 @@
     const last = flames[0]; // dizide en yeni başta
     const lastEl = document.getElementById('statLast');
     if (last) {
-      lastEl.textContent = fmtRelative(last.start);
+      const lastStatus = state.statuses[state.currentDeviceId];
+      const refNowSec = lastStatus ? lastStatus.timestamp : undefined;
+      lastEl.textContent = fmtRelative(last.start, refNowSec);
       lastEl.setAttribute('title', fmtDateTime(last.start));
     } else {
       lastEl.textContent = t('never');
@@ -350,7 +352,9 @@
   /* ---- Grafikler ---- */
   function renderCharts() {
     const flames = state.alarms.filter((a) => a.type === 'flame' && a.deviceId === state.currentDeviceId);
-    Charts.renderAlarmCount(flames, state.range);
+    const lastStatus = state.statuses[state.currentDeviceId];
+    const refNowSec = lastStatus ? lastStatus.timestamp : undefined;
+    Charts.renderAlarmCount(flames, state.range, refNowSec);
     Charts.renderTimeline(flames);
   }
   function renderTrend() {
@@ -656,7 +660,9 @@
   function setIcon(id, name, colorClass) {
     const el = document.getElementById(id);
     el.setAttribute('data-lucide', name);
-    el.className = (colorClass || '') + ' w-5 h-5';
+    // lucide.createIcons() <i> öğesini <svg>'e çevirir; SVGElement.className salt-okunurdur
+    // (yalnızca getter), bu yüzden setAttribute('class', ...) kullanılmalı.
+    el.setAttribute('class', (colorClass || '') + ' w-5 h-5');
     lucide.createIcons();
   }
 
@@ -756,8 +762,12 @@
     return new Date(epochSec * 1000).toLocaleString(getLang() === 'tr' ? 'tr-TR' : 'en-US',
       { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
-  function fmtRelative(epochSec) {
-    const diff = Math.floor(Date.now() / 1000) - epochSec; // saniye
+  function fmtRelative(epochSec, refNowSec) {
+    // "Şimdi" referansı: mümkünse cihazın kendi son zaman damgası (NTP saati tarayıcıyla
+    // senkron olmayabilir). Aksi halde alarm geleceğe düşüp "X sn sonra" görünebilir.
+    // Artık küçük kaymalara karşı da farkı negatife düşürmeyiz.
+    const now = refNowSec || Math.floor(Date.now() / 1000);
+    const diff = Math.max(0, now - epochSec); // saniye
     const rtf = new Intl.RelativeTimeFormat(getLang() === 'tr' ? 'tr' : 'en', { numeric: 'auto' });
     if (diff < 60) return rtf.format(-diff, 'second');
     if (diff < 3600) return rtf.format(-Math.floor(diff / 60), 'minute');
