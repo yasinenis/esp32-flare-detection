@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  ESP32 Alev Algılama — Gerçek Zamanlı İzleme Paneli (IoT Dashboard)
+  ----------------------------------------------------------------------------
+  • Bağlantı ve davranış ayarları: js/config.js  (CONFIG objesi)
+  • Sahte veri ile test için: CONFIG.mockMode = true (varsayılan)
+  • Bu bir canlı kontrol panelidir, tanıtım sitesi değildir.
+  ============================================================================
+-->
+<html lang="tr" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alev Algılama Paneli</title>
+
+  <!-- Yazı tipleri: Inter + Space Grotesk -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+
+  <!-- TailwindCSS (Play CDN — yerleşim/aralık için) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Tailwind: karanlık tema "class" stratejisiyle (<html class="dark">)
+    tailwind.config = { darkMode: 'class' };
+  </script>
+
+  <!-- Lucide ikonları -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+  <!-- Chart.js (grafikler) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <!-- MQTT over WebSocket (yalnızca CONFIG.primaryTransport === 'mqtt' iken kullanılır) -->
+  <script src="https://unpkg.com/mqtt@5.7.0/dist/mqtt.min.js"></script>
+
+  <link rel="stylesheet" href="css/dashboard.css" />
+</head>
+
+<body>
+  <!-- Alarm anında ekran kenarı kırmızı glow -->
+  <div id="edgeGlow"></div>
+
+  <!-- ====================================================================== -->
+  <!-- 1) ÜST BAR                                                              -->
+  <!-- ====================================================================== -->
+  <header class="sticky top-0 z-40 glass !rounded-none border-x-0 border-t-0">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+      <!-- Sol: logo + başlık -->
+      <div class="flex items-center gap-3 mr-auto">
+        <div class="metric-icon" style="background: color-mix(in srgb, var(--danger) 18%, transparent);">
+          <i data-lucide="flame" class="c-danger"></i>
+        </div>
+        <div>
+          <h1 class="font-display font-bold text-lg leading-tight" data-i18n="appTitle">Alev Algılama Paneli</h1>
+          <p class="text-faint text-xs leading-tight" data-i18n="appSubtitle">Gerçek Zamanlı İzleme</p>
+        </div>
+        <span id="mockBadge" class="mock-badge text-[11px] font-semibold px-2 py-1 rounded-md hidden" data-i18n="mockBadge">TEST MODU</span>
+      </div>
+
+      <!-- Cihaz seçici -->
+      <div class="flex items-center gap-2">
+        <i data-lucide="cpu" class="text-faint w-4 h-4"></i>
+        <select id="deviceSelect" class="field !w-auto" title="Cihaz" data-i18n-title="selectDevice"></select>
+      </div>
+
+      <!-- Bağlantı göstergesi -->
+      <div id="connBox" class="glass glass-hover flex items-center gap-3 px-3 py-2">
+        <span id="connDot" class="conn-dot conn-offline"></span>
+        <div class="leading-tight">
+          <div id="connText" class="font-display font-bold text-sm c-danger" data-i18n="offline">ÇEVRİMDIŞI</div>
+          <div id="lastSeen" class="text-faint text-[11px]">—</div>
+        </div>
+      </div>
+
+      <!-- Tema + dil -->
+      <button id="themeBtn" class="icon-btn" data-i18n-title="themeToggle" title="Tema">
+        <i data-lucide="moon" class="w-5 h-5"></i>
+      </button>
+      <button id="langBtn" class="icon-btn font-display font-bold text-sm" data-i18n-title="langToggle" title="Dil">TR</button>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 flex flex-col gap-6">
+
+    <!-- ==================================================================== -->
+    <!-- 2) ANA ALARM DURUMU PANELİ                                           -->
+    <!-- ==================================================================== -->
+    <section id="alarmPanel" class="glass alarm-panel waiting p-8 flex flex-col items-center text-center gap-3">
+      <div id="alarmIcon" class="alarm-icon">⏳</div>
+      <h2 id="alarmTitle" class="font-display font-extrabold text-3xl md:text-4xl tracking-tight" data-i18n="waitingTitle">VERİ BEKLENİYOR</h2>
+      <p id="alarmSubtitle" class="text-soft text-sm md:text-base" data-i18n="waitingSubtitle">Cihazdan henüz veri alınmadı</p>
+    </section>
+
+    <!-- ==================================================================== -->
+    <!-- 3) DURUM KARTLARI                                                    -->
+    <!-- ==================================================================== -->
+    <section class="grid gap-4 grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+      <!-- Dedektör -->
+      <div id="cardDetector" class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="detector">Dedektör Durumu</span>
+          <div class="metric-icon"><i data-lucide="scan-eye" class="w-5 h-5 c-gray"></i></div>
+        </div>
+        <span id="detectorValue" class="metric-value c-gray">—</span>
+      </div>
+
+      <!-- Buzzer -->
+      <div id="cardBuzzer" class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="buzzer">Buzzer</span>
+          <div class="metric-icon"><i data-lucide="bell" class="w-5 h-5 c-gray"></i></div>
+        </div>
+        <span id="buzzerValue" class="metric-value c-gray">—</span>
+      </div>
+
+      <!-- Güç kaynağı -->
+      <div id="cardPower" class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="powerSource">Güç Kaynağı</span>
+          <div class="metric-icon"><i id="powerIcon" data-lucide="plug" class="w-5 h-5 c-gray"></i></div>
+        </div>
+        <span id="powerValue" class="metric-value c-gray" style="font-size:1.1rem">—</span>
+        <span id="powerSub" class="metric-sub"></span>
+      </div>
+
+      <!-- Pil -->
+      <div id="cardBattery" class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="battery">Pil Seviyesi</span>
+          <div id="batt" class="batt c-gray"><div id="battFill" class="batt-fill" style="width:0%; background: var(--gray);"></div></div>
+        </div>
+        <span class="metric-value c-gray"><span id="battPercent" class="tnum">—</span><span class="text-base">%</span></span>
+        <span id="battSub" class="metric-sub"></span>
+      </div>
+
+      <!-- WiFi -->
+      <div id="cardWifi" class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="wifiSignal">WiFi Sinyali</span>
+          <div class="wifi-bars" id="wifiBars"><span></span><span></span><span></span><span></span></div>
+        </div>
+        <span id="wifiValue" class="metric-value">—</span>
+        <span id="wifiSub" class="metric-sub tnum"></span>
+      </div>
+
+      <!-- Uptime -->
+      <div class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="uptime">Çalışma Süresi</span>
+          <div class="metric-icon"><i data-lucide="timer" class="w-5 h-5 c-accent"></i></div>
+        </div>
+        <span id="uptimeValue" class="metric-value tnum">—</span>
+      </div>
+
+      <!-- Sistem sağlığı -->
+      <div class="glass glass-hover metric-card state-gray">
+        <div class="flex items-center justify-between">
+          <span class="metric-label" data-i18n="systemHealth">Sistem Sağlığı</span>
+          <div class="metric-icon"><i data-lucide="activity" class="w-5 h-5 c-accent"></i></div>
+        </div>
+        <span class="metric-value"><span id="heapValue" class="tnum">—</span> <span class="text-sm text-soft">KB</span></span>
+        <span id="fwValue" class="metric-sub"></span>
+      </div>
+    </section>
+
+    <!-- ==================================================================== -->
+    <!-- 5) İSTATİSTİK KARTLARI (özet)                                        -->
+    <!-- ==================================================================== -->
+    <section class="grid gap-4 grid-cols-2 xl:grid-cols-4">
+      <div class="glass metric-card">
+        <span class="metric-label" data-i18n="statsToday">Bugünkü Alarm</span>
+        <span id="statToday" class="metric-value tnum c-danger">0</span>
+      </div>
+      <div class="glass metric-card">
+        <span class="metric-label" data-i18n="statsWeek">Bu Haftaki Alarm</span>
+        <span id="statWeek" class="metric-value tnum c-warn">0</span>
+      </div>
+      <div class="glass metric-card">
+        <span class="metric-label" data-i18n="statsLast">En Son Alarm</span>
+        <span id="statLast" class="metric-value" style="font-size:1.1rem" title="">—</span>
+      </div>
+      <div class="glass metric-card">
+        <span class="metric-label" data-i18n="statsLongest">En Uzun Alarm</span>
+        <span id="statLongest" class="metric-value tnum">—</span>
+      </div>
+    </section>
+
+    <!-- ==================================================================== -->
+    <!-- 4) ALARM GEÇMİŞİ GRAFİKLERİ                                          -->
+    <!-- ==================================================================== -->
+    <section class="glass p-5 flex flex-col gap-5">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <h3 class="font-display font-bold text-lg flex items-center gap-2">
+          <i data-lucide="bar-chart-3" class="w-5 h-5 c-accent"></i>
+          <span data-i18n="chartsTitle">Alarm Geçmişi</span>
+        </h3>
+        <div id="rangeButtons" class="flex gap-2 flex-wrap">
+          <button class="btn range-btn" data-range="1h"  data-i18n="range1h">Son 1 saat</button>
+          <button class="btn range-btn active" data-range="24h" data-i18n="range24h">Son 24 saat</button>
+          <button class="btn range-btn" data-range="7d"  data-i18n="range7d">Son 7 gün</button>
+          <button class="btn range-btn" data-range="30d" data-i18n="range30d">Son 30 gün</button>
+        </div>
+      </div>
+
+      <div class="grid gap-5 lg:grid-cols-2">
+        <div class="glass p-4">
+          <h4 class="metric-label mb-2" data-i18n="chartAlarmCount">Zamana Göre Alarm Sayısı</h4>
+          <div class="h-56"><canvas id="chartAlarmCount"></canvas></div>
+        </div>
+        <div class="glass p-4">
+          <h4 class="metric-label mb-2" data-i18n="chartTimeline">Alarm Zaman Çizelgesi</h4>
+          <div class="h-56"><canvas id="chartTimeline"></canvas></div>
+        </div>
+      </div>
+      <div class="glass p-4">
+        <h4 class="metric-label mb-2" data-i18n="chartTrend">Pil Voltajı & Sinyal Trendi</h4>
+        <div class="h-56"><canvas id="chartTrend"></canvas></div>
+      </div>
+    </section>
+
+    <!-- ==================================================================== -->
+    <!-- 6) OLAY GÜNLÜĞÜ TABLOSU                                              -->
+    <!-- ==================================================================== -->
+    <section class="glass p-5 flex flex-col gap-4">
+      <div class="flex items-center justify-between flex-wrap gap-3">
+        <h3 class="font-display font-bold text-lg flex items-center gap-2">
+          <i data-lucide="list" class="w-5 h-5 c-accent"></i>
+          <span data-i18n="logTitle">Olay Günlüğü</span>
+        </h3>
+        <button id="exportBtn" class="btn btn-accent">
+          <i data-lucide="download" class="w-4 h-4"></i>
+          <span data-i18n="exportCsv">CSV Dışa Aktar</span>
+        </button>
+      </div>
+      <div class="scroll-y rounded-lg">
+        <table class="log-table">
+          <thead>
+            <tr>
+              <th data-i18n="colNo">#</th>
+              <th data-i18n="colStart">Başlangıç</th>
+              <th data-i18n="colEnd">Bitiş</th>
+              <th data-i18n="colDuration">Süre</th>
+              <th data-i18n="colType">Olay Tipi</th>
+              <th data-i18n="colActions">İşlem</th>
+            </tr>
+          </thead>
+          <tbody id="logBody">
+            <tr><td colspan="6" class="text-center text-faint py-8" data-i18n="logEmpty">Henüz olay kaydı yok</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================================================================== -->
+    <!-- 7) UZAKTAN KONTROL PANELİ                                            -->
+    <!-- ==================================================================== -->
+    <section class="glass p-5 flex flex-col gap-4">
+      <h3 class="font-display font-bold text-lg flex items-center gap-2">
+        <i data-lucide="sliders-horizontal" class="w-5 h-5 c-accent"></i>
+        <span data-i18n="controlTitle">Uzaktan Kontrol</span>
+      </h3>
+      <div class="grid gap-3 sm:grid-cols-3">
+        <button id="muteBtn" class="btn btn-warn">
+          <i data-lucide="bell-off" class="w-4 h-4"></i><span data-i18n="mute">Buzzer'ı Sustur</span>
+        </button>
+        <button id="testBtn" class="btn btn-accent">
+          <i data-lucide="flame" class="w-4 h-4"></i><span data-i18n="testAlarm">Test Alarmı Çalıştır</span>
+        </button>
+        <button id="restartBtn" class="btn btn-danger">
+          <i data-lucide="power" class="w-4 h-4"></i><span data-i18n="restart">Cihazı Yeniden Başlat</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- ==================================================================== -->
+    <!-- 8) BİLDİRİM AYARLARI                                                 -->
+    <!-- ==================================================================== -->
+    <section class="glass p-5 flex flex-col gap-5">
+      <h3 class="font-display font-bold text-lg flex items-center gap-2">
+        <i data-lucide="settings" class="w-5 h-5 c-accent"></i>
+        <span data-i18n="settingsTitle">Bildirim Ayarları</span>
+      </h3>
+
+      <div class="grid gap-4 md:grid-cols-2">
+        <!-- Tarayıcı bildirimi -->
+        <div class="flex items-center justify-between gap-4">
+          <div class="flex items-center gap-2">
+            <i data-lucide="bell-ring" class="w-4 h-4 text-soft"></i>
+            <span data-i18n="browserNotif">Tarayıcı Bildirimi</span>
+          </div>
+          <div id="notifSwitch" class="switch"></div>
+        </div>
+
+        <!-- Sesli alarm -->
+        <div class="flex items-center justify-between gap-4">
+          <div class="flex items-center gap-2">
+            <i data-lucide="volume-2" class="w-4 h-4 text-soft"></i>
+            <span data-i18n="soundAlarm">Sesli Alarm</span>
+          </div>
+          <div id="soundSwitch" class="switch on"></div>
+        </div>
+
+        <!-- Ses seviyesi -->
+        <div class="flex items-center gap-3 md:col-span-2">
+          <span class="text-soft text-sm w-28" data-i18n="volume">Ses Seviyesi</span>
+          <input id="volume" type="range" min="0" max="100" value="70" class="flex-1 accent-cyan-400" />
+          <span id="volumeVal" class="tnum text-soft text-sm w-10 text-right">70%</span>
+        </div>
+      </div>
+
+      <!-- Backend entegrasyon placeholder -->
+      <div class="border-t pt-4" style="border-color: var(--panel-border);">
+        <p class="text-faint text-xs mb-3 flex items-center gap-2">
+          <i data-lucide="info" class="w-4 h-4"></i>
+          <span data-i18n="integrationsNote">Aşağıdaki alanlar backend entegrasyonu içindir (yer tutucu).</span>
+        </p>
+        <div class="grid gap-3 md:grid-cols-3">
+          <div>
+            <label class="metric-label" data-i18n="telegramToken">Telegram Bot Token</label>
+            <input id="tgToken" class="field mt-1" placeholder="123456:ABC-DEF..." />
+          </div>
+          <div>
+            <label class="metric-label" data-i18n="telegramChat">Telegram Chat ID</label>
+            <input id="tgChat" class="field mt-1" placeholder="-1001234567890" />
+          </div>
+          <div>
+            <label class="metric-label" data-i18n="emailTo">E-posta Adresi</label>
+            <input id="emailTo" class="field mt-1" placeholder="ornek@mail.com" />
+          </div>
+        </div>
+        <button id="saveSettingsBtn" class="btn btn-accent mt-3">
+          <i data-lucide="save" class="w-4 h-4"></i><span data-i18n="saveSettings">Ayarları Kaydet</span>
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==================================================================== -->
+  <!-- 9) FOOTER                                                            -->
+  <!-- ==================================================================== -->
+  <footer class="max-w-7xl mx-auto px-4 py-6 text-soft text-xs flex flex-wrap gap-x-6 gap-y-2 justify-center">
+    <span><span class="text-faint" data-i18n="footerDevice">Cihaz</span>: <b id="footDevice">—</b></span>
+    <span><span class="text-faint" data-i18n="footerFirmware">Yazılım</span>: <b id="footFirmware">—</b></span>
+    <span><span class="text-faint" data-i18n="footerLastData">Son Veri</span>: <b id="footLastData">—</b></span>
+    <span><span class="text-faint" data-i18n="footerProtocol">Protokol</span>: <b id="footProtocol">—</b></span>
+  </footer>
+
+  <!-- Toast bildirim alanı -->
+  <div id="toastWrap"></div>
+
+  <!-- Yeniden başlat onay modalı -->
+  <div id="modalWrap">
+    <div class="glass modal-card p-6 flex flex-col gap-4">
+      <div class="flex items-center gap-3">
+        <div class="metric-icon" style="background: color-mix(in srgb, var(--danger) 18%, transparent);">
+          <i data-lucide="alert-triangle" class="c-danger"></i>
+        </div>
+        <h4 class="font-display font-bold text-lg" data-i18n="confirmRestart">Cihaz yeniden başlatılsın mı?</h4>
+      </div>
+      <p class="text-soft text-sm" data-i18n="confirmRestartBody">Cihaz birkaç saniye çevrimdışı kalacak. Devam edilsin mi?</p>
+      <div class="flex gap-3 justify-end">
+        <button id="modalCancel" class="btn" data-i18n="cancel">Vazgeç</button>
+        <button id="modalConfirm" class="btn btn-danger" data-i18n="confirm">Evet, Başlat</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====================================================================== -->
+  <!-- Uygulama betikleri (sıra önemli)                                       -->
+  <!-- ====================================================================== -->
+  <script src="js/config.js"></script>
+  <script src="js/i18n.js"></script>
+  <script src="js/notifications.js"></script>
+  <script src="js/mock.js"></script>
+  <script src="js/connection.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

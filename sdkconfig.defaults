@@ -1,0 +1,10 @@
+# ============================================================================
+#  Proje varsayılan menuconfig ayarları
+#  ----------------------------------------------------------------------------
+#  Bu dosya, sdkconfig SIFIRDAN üretilirken (örn. sdkconfig silinince ya da
+#  `idf.py set-target esp32` sonrası) otomatik uygulanır.
+#  Web dashboard için kritik: esp_http_server WebSocket desteği.
+# ============================================================================
+
+# esp_http_server üzerinde WebSocket sunucu desteği (/ws endpoint için ZORUNLU)
+CONFIG_HTTPD_WS_SUPPORT=y

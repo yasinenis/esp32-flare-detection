@@ -64,9 +64,52 @@ Proje **ESP-IDF** (Espressif IoT Development Framework) kullanılarak C dili ile
    idf.py build flash monitor
    ```
 
+## 🌐 Web Dashboard (Gerçek Zamanlı İzleme Paneli)
+
+Cihaz artık WiFi'ye bağlanıp durum verisini **WebSocket** ile canlı yayınlar; bir web
+kontrol paneli ([dashboard/](dashboard/)) bu veriyi gerçek zamanlı gösterir (alarm
+durumu, pil/güç, sinyal, alarm geçmişi grafikleri, olay günlüğü, uzaktan komut).
+
+### Cihaz tarafı kurulum (firmware)
+1. **WiFi bilgilerinizi girin** — bunlar GitHub'a gitmeyen `secrets.h` dosyasında tutulur:
+   ```bash
+   # main/secrets.example.h şablonunu kopyalayın:
+   cp main/secrets.example.h main/secrets.h
+   ```
+   Ardından [main/secrets.h](main/secrets.h) içine WiFi adı/şifrenizi yazın:
+   ```c
+   #define WIFI_SSID  "WIFI_ADINIZ"
+   #define WIFI_PASS  "WIFI_SIFRENIZ"
+   ```
+   > `secrets.h`, `.gitignore` ile yok sayılır → şifreniz **asla** depoya/GitHub'a gitmez.
+   > Cihaz adını değiştirmek isterseniz `DEVICE_ID`, [main/main.c](main/main.c) içindedir
+   > (panel `CONFIG.devices[].id` ile aynı olmalı).
+2. Derleyip yükleyin: `idf.py build flash monitor`
+3. Seri çıktıda cihazın IP'sini görün (örn. `IP: 192.168.1.50`).
+
+> ⚠️ `secrets.h` yoksa derleme bilinçli olarak durur ve sizi uyarır (örnek dosyayı kopyalamanız için).
+
+> WebSocket sunucu desteği (`CONFIG_HTTPD_WS_SUPPORT`) `sdkconfig` + `sdkconfig.defaults`
+> içinde açıldı. `sdkconfig`'i sıfırdan üretirseniz `sdkconfig.defaults` bunu korur.
+
+### Panel tarafı kurulum
+1. [dashboard/js/config.js](dashboard/js/config.js) içinde:
+   ```js
+   mockMode: false,
+   websocket: { url: 'ws://192.168.1.50/ws' },  // cihazın IP'si
+   http:      { baseUrl: 'http://192.168.1.50' },
+   ```
+2. Paneli çalıştırın: `cd dashboard && python3 -m http.server 8080` → `http://localhost:8080`
+
+Cihazın sunduğu uç noktalar: `ws://<IP>/ws` (canlı durum + komut), `GET /api/status`,
+`GET /api/alarms`, `POST /api/command`. Ayrıntılar: [dashboard/README.md](dashboard/README.md).
+
 ## 📂 Proje Yapısı
 
-- `main/main.c`: I2C, AXP192 başlatma, OLED ekran bitmap grafikleri (framebuffer) ve ana kontrol döngüsünü barındıran temel kod dosyası.
+- `main/main.c`: I2C, AXP192 (PMU) başlatma + güç okuma, OLED framebuffer grafikleri, alev algılama, **WiFi (STA) + SNTP + WebSocket/HTTP sunucu** ve JSON üretimi.
+- `main/CMakeLists.txt`: ağ bileşenleri (`esp_wifi`, `esp_http_server`, `json` vb.) eklenmiş bileşen kaydı.
+- `sdkconfig.defaults`: WebSocket sunucu desteğini (`CONFIG_HTTPD_WS_SUPPORT`) kalıcı kılan varsayılanlar.
+- `dashboard/`: Gerçek zamanlı web izleme paneli (HTML + Tailwind + vanilla JS, Chart.js).
 - `bağlantıl-şemasi.md`: Alternatif ve detaylı bağlantı notları.
 - `.gitignore`: ESP-IDF derleme dosyalarının ve IDE ayarlarının git'e atılmasını engelleyen kurallar.
 

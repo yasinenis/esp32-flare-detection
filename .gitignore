@@ -13,5 +13,18 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# IDE specific (optional, uncomment if you don't want to commit VSCode settings)
-# .vscode/
+# ============================================================================
+#  GİZLİ KİMLİK BİLGİLERİ — GitHub'a ASLA gönderilmez
+#  (secrets.example.h şablonu commit edilir; secrets.h gerçek bilgileri tutar)
+# ============================================================================
+secrets.h
+main/secrets.h
+**/secrets.h
+
+# Diğer olası gizli dosyalar
+.env
+*.env
+credentials.h
+
+# IDE / makineye özel ayarlar (yerel IDF yolu, COM portu vb.)
+.vscode/

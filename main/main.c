@@ -1,12 +1,48 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "esp_system.h"
+#include "esp_mac.h"
+// --- Ağ / sunucu bileşenleri (web dashboard entegrasyonu) ---
+#include "nvs_flash.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_wifi.h"
+#include "esp_sntp.h"
+#include "esp_http_server.h"
+#include "cJSON.h"
 
 static const char *TAG = "FLAME_DETECTOR";
+
+// ========================================================================
+//  >>> WEB DASHBOARD AYARLARI <<<
+// ========================================================================
+//  WiFi bilgileri GİZLİ tutulur ve GitHub'a GÖNDERİLMEZ:
+//    -> main/secrets.h  (.gitignore tarafından yok sayılır)
+//  Kurulum: main/secrets.example.h dosyasını main/secrets.h olarak kopyalayın
+//           ve WiFi adı/şifrenizi girin.
+// ------------------------------------------------------------------------
+#if defined(__has_include)
+#  if __has_include("secrets.h")
+#    include "secrets.h"   // WIFI_SSID ve WIFI_PASS buradan gelir
+#  endif
+#endif
+#ifndef WIFI_SSID
+#  error "main/secrets.h bulunamadi! 'main/secrets.example.h' -> 'main/secrets.h' olarak kopyalayip WiFi bilgilerinizi girin."
+#endif
+
+#define DEVICE_ID      "tbeam-01"         // panel CONFIG.devices[].id ile AYNI olmalı
+#define FIRMWARE_VER   "1.0.0"
+#define STATUS_PERIOD_US (2 * 1000000)    // durum yayını periyodu (2 sn)
+#define MAX_ALARM_HIST  50                // RAM'de tutulacak alarm geçmişi adedi
+// ========================================================================
 
 // Pin Tanımlamaları
 #define FLAME_SENSOR_GPIO 13
@@ -19,9 +55,32 @@ static const char *TAG = "FLAME_DETECTOR";
 // AXP192 (PMU) Adres ve Yazmaçlar
 #define AXP192_ADDR          0x34
 #define AXP192_LDO23_DC1_CTRL 0x12
+#define AXP192_ADC_EN1        0x82   // ADC açma register'ı (pil voltajı/akımı vb.)
+#define AXP192_POWER_STATUS   0x00   // VBUS/şarj yönü
+#define AXP192_CHARGE_STATUS  0x01   // şarj göstergesi / pil var mı
+#define AXP192_BAT_VOLT_H     0x78   // pil voltajı ADC (12-bit, 1.1mV/LSB)
+#define AXP192_BAT_CHG_CUR_H  0x7A   // şarj akımı (13-bit, 0.5mA/LSB)
+#define AXP192_BAT_DIS_CUR_H  0x7C   // deşarj akımı (13-bit, 0.5mA/LSB)
 
 // SSD1306 (OLED) Adres
 #define OLED_ADDR            0x3C
+
+// ------------------------------------------------------------------------
+//  Paylaşılan durum (task'lar arası)
+// ------------------------------------------------------------------------
+static httpd_handle_t g_server = NULL;
+static volatile bool  g_wifi_connected = false;
+static volatile bool  g_muted = false;          // buzzer susturuldu mu (mute komutu)
+static volatile int64_t g_test_until_us = 0;     // test alarmının biteceği zaman
+
+// Bellekte küçük alarm geçmişi (panelin GET /api/alarms isteği için)
+typedef struct { int id; long start; long end; int durationSec; } alarm_rec_t;
+static alarm_rec_t g_alarms[MAX_ALARM_HIST];
+static int g_alarm_count = 0;
+static int g_alarm_next_id = 1;
+
+// İleri bildirimler
+static void axp_read_power(bool *usb, bool *charging, int *pct, float *volt, int *curMa);
 
 // ========================================================================
 // 5x7 Font Tablosu (ASCII 32-90: boşluk, noktalama, rakamlar, harfler)
@@ -129,7 +188,83 @@ void axp192_init(void) {
     i2c_master_stop(cmd);
     i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
     i2c_cmd_link_delete(cmd);
-    ESP_LOGI(TAG, "AXP192: OLED ve 3.3V Raylari (LDO2/3) acildi.");
+
+    // --- ADC'leri aç: pil voltajı/akımı, VBUS vb. (güç verisi okumak için) ---
+    cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (AXP192_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, AXP192_ADC_EN1, true);
+    i2c_master_write_byte(cmd, 0xFF, true); // tüm ADC kanallarını etkinleştir
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+
+    ESP_LOGI(TAG, "AXP192: OLED/3.3V raylari acildi, ADC'ler etkin.");
+}
+
+// ========================================================================
+//  AXP192 Güç Verisi Okuma (pil/şarj/USB/akım)
+// ========================================================================
+
+/** Tek bir AXP192 register'ını okur. */
+static uint8_t axp_read8(uint8_t reg) {
+    uint8_t val = 0;
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (AXP192_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(cmd, reg, true);
+    i2c_master_start(cmd);
+    i2c_master_write_byte(cmd, (AXP192_ADDR << 1) | I2C_MASTER_READ, true);
+    i2c_master_read_byte(cmd, &val, I2C_MASTER_NACK);
+    i2c_master_stop(cmd);
+    i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 100 / portTICK_PERIOD_MS);
+    i2c_cmd_link_delete(cmd);
+    return val;
+}
+
+/** 12-bit ADC (yüksek 8 bit + düşük 4 bit). */
+static uint16_t axp_read12(uint8_t regH) {
+    uint8_t h = axp_read8(regH);
+    uint8_t l = axp_read8(regH + 1);
+    return ((uint16_t)h << 4) | (l & 0x0F);
+}
+
+/** 13-bit ADC (yüksek 8 bit + düşük 5 bit) — akım okumaları için. */
+static uint16_t axp_read13(uint8_t regH) {
+    uint8_t h = axp_read8(regH);
+    uint8_t l = axp_read8(regH + 1);
+    return ((uint16_t)h << 5) | (l & 0x1F);
+}
+
+/** Pil voltajından kabaca yüzde tahmini (LiPo, 3.3V=%0 .. 4.2V=%100). */
+static int batt_pct_from_voltage(float v) {
+    if (v <= 3.30f) return 0;
+    if (v >= 4.20f) return 100;
+    return (int)((v - 3.30f) / (4.20f - 3.30f) * 100.0f + 0.5f);
+}
+
+/**
+ * AXP192'den güç durumunu okur.
+ * NOT: Pil takılı değilse voltaj ~0 ve yüzde 0 görünür (bu normaldir).
+ *      Bit konumları kart/PMU revizyonuna göre nadiren değişebilir.
+ */
+static void axp_read_power(bool *usb, bool *charging, int *pct, float *volt, int *curMa) {
+    uint8_t powerStatus  = axp_read8(AXP192_POWER_STATUS);  // 0x00
+    uint8_t chargeStatus = axp_read8(AXP192_CHARGE_STATUS); // 0x01
+
+    bool usbPresent  = (powerStatus  & 0x20) != 0; // VBUS mevcut
+    bool batPresent  = (chargeStatus & 0x20) != 0; // pil takılı
+    bool isCharging  = (chargeStatus & 0x40) != 0; // şarj göstergesi
+
+    float vBat = axp_read12(AXP192_BAT_VOLT_H) * 1.1f / 1000.0f; // Volt
+    int chgCur = (int)(axp_read13(AXP192_BAT_CHG_CUR_H) * 0.5f); // mA
+    int disCur = (int)(axp_read13(AXP192_BAT_DIS_CUR_H) * 0.5f); // mA
+
+    *usb      = usbPresent;
+    *charging = batPresent && isCharging;
+    *volt     = batPresent ? vBat : 0.0f;
+    *pct      = batPresent ? batt_pct_from_voltage(vBat) : 0;
+    *curMa    = batPresent ? (chgCur - disCur) : 0; // + şarj, - deşarj
 }
 
 // ========================================================================
@@ -416,6 +551,323 @@ static void generate_safe_bitmap(void) {
 }
 
 // ========================================================================
+//  JSON Üretimi (durum + alarm geçmişi) — panel şemasıyla birebir
+// ========================================================================
+
+/** Şemaya uygun anlık durum JSON'u üretir. Dönen string'i çağıran free etmeli. */
+static char *build_status_json(bool detected, bool buzzer) {
+    bool usb, charging; int pct, curMa; float volt;
+    axp_read_power(&usb, &charging, &pct, &volt, &curMa);
+
+    int rssi = 0;
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "deviceId", DEVICE_ID);
+    cJSON_AddBoolToObject(root, "online", true);
+    cJSON_AddNumberToObject(root, "timestamp", (double)time(NULL));
+    cJSON_AddNumberToObject(root, "uptimeSec", (double)(esp_timer_get_time() / 1000000));
+    cJSON_AddStringToObject(root, "firmware", FIRMWARE_VER);
+
+    cJSON *flame = cJSON_AddObjectToObject(root, "flame");
+    cJSON_AddBoolToObject(flame, "detected", detected);
+    cJSON_AddBoolToObject(flame, "sensorActive", true); // dijital sensör; arıza tespiti yoksa true
+
+    cJSON_AddBoolToObject(root, "buzzer", buzzer);
+
+    cJSON *power = cJSON_AddObjectToObject(root, "power");
+    cJSON_AddBoolToObject(power, "usbConnected", usb);
+    cJSON_AddBoolToObject(power, "charging", charging);
+    cJSON_AddNumberToObject(power, "batteryPercent", pct);
+    cJSON_AddNumberToObject(power, "batteryVoltage", volt);
+    cJSON_AddNumberToObject(power, "currentMa", curMa);
+
+    cJSON *wifi = cJSON_AddObjectToObject(root, "wifi");
+    cJSON_AddNumberToObject(wifi, "rssi", rssi);
+
+    cJSON *sys = cJSON_AddObjectToObject(root, "system");
+    cJSON_AddNumberToObject(sys, "freeHeap", (double)esp_get_free_heap_size());
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return out;
+}
+
+/** Bellekteki alarm geçmişini JSON dizisi olarak üretir (GET /api/alarms). */
+static char *build_alarms_json(void) {
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < g_alarm_count; i++) {
+        cJSON *a = cJSON_CreateObject();
+        cJSON_AddNumberToObject(a, "id", g_alarms[i].id);
+        cJSON_AddNumberToObject(a, "start", (double)g_alarms[i].start);
+        cJSON_AddNumberToObject(a, "end", (double)g_alarms[i].end);
+        cJSON_AddNumberToObject(a, "durationSec", g_alarms[i].durationSec);
+        cJSON_AddItemToArray(arr, a);
+    }
+    char *out = cJSON_PrintUnformatted(arr);
+    cJSON_Delete(arr);
+    return out;
+}
+
+/** Biten bir alarm olayını geçmişe ekler (gerekirse en eskisini düşürür). */
+static void history_push(long start, long end, int durationSec) {
+    alarm_rec_t rec = { g_alarm_next_id++, start, end, durationSec };
+    if (g_alarm_count < MAX_ALARM_HIST) {
+        g_alarms[g_alarm_count++] = rec;
+    } else {
+        memmove(&g_alarms[0], &g_alarms[1], sizeof(alarm_rec_t) * (MAX_ALARM_HIST - 1));
+        g_alarms[MAX_ALARM_HIST - 1] = rec;
+    }
+}
+
+// ========================================================================
+//  WebSocket yayını + Komut işleme
+// ========================================================================
+
+/** Bağlı tüm WebSocket istemcilerine metin (JSON) gönderir. */
+static void ws_broadcast(const char *json) {
+    if (!g_server || !json) return;
+    size_t fds = CONFIG_LWIP_MAX_SOCKETS;
+    int client_fds[CONFIG_LWIP_MAX_SOCKETS];
+    if (httpd_get_client_list(g_server, &fds, client_fds) != ESP_OK) return;
+
+    for (size_t i = 0; i < fds; i++) {
+        if (httpd_ws_get_fd_info(g_server, client_fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
+            httpd_ws_frame_t frame = {0};
+            frame.type = HTTPD_WS_TYPE_TEXT;
+            frame.payload = (uint8_t *)json;
+            frame.len = strlen(json);
+            httpd_ws_send_frame_async(g_server, client_fds[i], &frame);
+        }
+    }
+}
+
+/** Panelden gelen komutu işler: "mute" | "test" | "restart" (JSON veya düz metin). */
+static void handle_command(const char *msg) {
+    if (!msg) return;
+    const char *cmd = msg;
+    cJSON *root = cJSON_Parse(msg);
+    if (root) {
+        cJSON *c = cJSON_GetObjectItem(root, "command");
+        if (cJSON_IsString(c) && c->valuestring) cmd = c->valuestring;
+    }
+    bool isRestart = strstr(cmd, "restart") != NULL;
+    bool isMute    = strstr(cmd, "mute")    != NULL;
+    bool isTest    = strstr(cmd, "test")    != NULL;
+    if (root) cJSON_Delete(root); // cmd bundan sonra geçersiz — booleanları önce hesapladık
+
+    if (isRestart) {
+        ESP_LOGW(TAG, "Komut: cihaz yeniden baslatiliyor");
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+        esp_restart();
+    } else if (isMute) {
+        ESP_LOGI(TAG, "Komut: buzzer susturuldu (mute)");
+        g_muted = true;
+        gpio_set_level(BUZZER_GPIO, 0);
+    } else if (isTest) {
+        ESP_LOGI(TAG, "Komut: test alarmi (6 sn)");
+        g_test_until_us = esp_timer_get_time() + 6 * 1000000;
+    }
+}
+
+// ========================================================================
+//  HTTP / WebSocket Sunucu
+// ========================================================================
+
+/** Panel farklı bir kaynaktan (origin) servis edildiği için CORS başlıkları. */
+static void set_cors(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+}
+
+/** /ws — WebSocket: handshake (GET) + gelen komut çerçeveleri. */
+static esp_err_t ws_handler(httpd_req_t *req) {
+    if (req->method == HTTP_GET) {
+        ESP_LOGI(TAG, "WebSocket istemci baglandi.");
+        return ESP_OK; // handshake tamam
+    }
+    httpd_ws_frame_t ws_pkt = {0};
+    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+    // Önce uzunluğu öğren
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) return ret;
+    if (ws_pkt.len) {
+        uint8_t *buf = calloc(1, ws_pkt.len + 1);
+        if (!buf) return ESP_ERR_NO_MEM;
+        ws_pkt.payload = buf;
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret == ESP_OK) handle_command((char *)buf);
+        free(buf);
+    }
+    return ESP_OK;
+}
+
+/** GET /api/status — anlık durum (HTTP fallback / polling). */
+static esp_err_t status_get_handler(httpd_req_t *req) {
+    set_cors(req);
+    int raw = gpio_get_level(FLAME_SENSOR_GPIO);
+    bool detected = (raw == 0) || (esp_timer_get_time() < g_test_until_us);
+    char *json = build_status_json(detected, detected && !g_muted);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "{}");
+    free(json);
+    return ESP_OK;
+}
+
+/** GET /api/alarms — alarm geçmişi (panel grafikleri/günlüğü). */
+static esp_err_t alarms_get_handler(httpd_req_t *req) {
+    set_cors(req);
+    char *json = build_alarms_json();
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json ? json : "[]");
+    free(json);
+    return ESP_OK;
+}
+
+/** POST /api/command — uzaktan komut (HTTP fallback). */
+static esp_err_t command_post_handler(httpd_req_t *req) {
+    set_cors(req);
+    char buf[256];
+    int total = req->content_len;
+    if (total > 0 && total < (int)sizeof(buf)) {
+        int r = httpd_req_recv(req, buf, total);
+        if (r > 0) { buf[r] = 0; handle_command(buf); }
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/** OPTIONS /api/command — CORS preflight. */
+static esp_err_t options_handler(httpd_req_t *req) {
+    set_cors(req);
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+static void start_webserver(void) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_open_sockets = 4;
+    config.lru_purge_enable = true;
+    if (httpd_start(&g_server, &config) != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP/WS sunucu baslatilamadi!");
+        return;
+    }
+    httpd_uri_t ws = { .uri = "/ws",          .method = HTTP_GET,     .handler = ws_handler, .is_websocket = true };
+    httpd_uri_t st = { .uri = "/api/status",  .method = HTTP_GET,     .handler = status_get_handler };
+    httpd_uri_t al = { .uri = "/api/alarms",  .method = HTTP_GET,     .handler = alarms_get_handler };
+    httpd_uri_t cm = { .uri = "/api/command", .method = HTTP_POST,    .handler = command_post_handler };
+    httpd_uri_t op = { .uri = "/api/command", .method = HTTP_OPTIONS, .handler = options_handler };
+    httpd_register_uri_handler(g_server, &ws);
+    httpd_register_uri_handler(g_server, &st);
+    httpd_register_uri_handler(g_server, &al);
+    httpd_register_uri_handler(g_server, &cm);
+    httpd_register_uri_handler(g_server, &op);
+    ESP_LOGI(TAG, "HTTP/WS sunucu basladi (port 80): /ws, /api/status, /api/alarms, /api/command");
+}
+
+// ========================================================================
+//  WiFi (STA) + SNTP (gerçek epoch zaman damgası için)
+// ========================================================================
+
+static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        g_wifi_connected = false;
+        ESP_LOGW(TAG, "WiFi koptu — yeniden baglaniliyor...");
+        esp_wifi_connect();
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        ESP_LOGI(TAG, "WiFi baglandi. IP: " IPSTR "  (panel: ws://" IPSTR "/ws)",
+                 IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.ip));
+        g_wifi_connected = true;
+        if (!g_server) start_webserver();
+    }
+}
+
+static void sntp_start(void) {
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    setenv("TZ", "UTC0", 1); // panel zamanı yerel saate kendi çevirir
+    tzset();
+}
+
+static void wifi_init_sta(void) {
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_wifi_event, NULL));
+
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, WIFI_PASS, sizeof(wc.sta.password) - 1);
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    sntp_start();
+}
+
+// ========================================================================
+//  İzleme Görevi (alev algılama + buzzer + OLED + WebSocket yayını)
+// ========================================================================
+
+static void monitor_task(void *arg) {
+    int last_detected = -1;
+    long active_start = 0;
+    int64_t last_bcast = 0;
+
+    while (1) {
+        int raw = gpio_get_level(FLAME_SENSOR_GPIO);
+        bool detected = (raw == 0);                                  // GPIO13 LOW = alev
+        if (esp_timer_get_time() < g_test_until_us) detected = true; // test alarmı override
+        bool buzzer = detected && !g_muted;
+
+        // Durum değişiminde: OLED, alarm geçmişi ve ANINDA yayın
+        if ((int)detected != last_detected) {
+            if (detected) {
+                ESP_LOGW(TAG, ">>> ALEV TESPIT EDILDI! <<<");
+                oled_draw_bitmap(fb_flame);
+                active_start = time(NULL);
+            } else {
+                ESP_LOGI(TAG, "Durum: Normal (Alev yok)");
+                oled_draw_bitmap(fb_safe);
+                g_muted = false; // alev bitince mute sıfırlanır (sonraki alarm yine öter)
+                if (active_start > 0) {
+                    long now = time(NULL);
+                    history_push(active_start, now, (int)(now - active_start));
+                }
+            }
+            char *j = build_status_json(detected, buzzer);
+            ws_broadcast(j);
+            free(j);
+            last_bcast = esp_timer_get_time();
+            last_detected = detected;
+        }
+
+        gpio_set_level(BUZZER_GPIO, buzzer ? 1 : 0);
+
+        // Periyodik yayın (2 sn) — alarm yokken de canlı kalır
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_bcast >= STATUS_PERIOD_US) {
+            char *j = build_status_json(detected, buzzer);
+            ws_broadcast(j);
+            free(j);
+            last_bcast = now_us;
+        }
+
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+    }
+}
+
+// ========================================================================
 // Ana Uygulama
 // ========================================================================
 
@@ -460,29 +912,18 @@ void app_main(void) {
     // 7. Başlangıç ekranı: güvenli
     oled_draw_bitmap(fb_safe);
 
-    ESP_LOGI(TAG, "Sistem Hazir. Izleme basliyor...");
-
-    int last_flame_val = -1;
-
-    while (1) {
-        int flame_val = gpio_get_level(FLAME_SENSOR_GPIO);
-
-        // Sadece durum değiştiğinde ekranı güncelle
-        if (flame_val != last_flame_val) {
-            if (flame_val == 0) {
-                // ALEV TESPİT EDİLDİ
-                ESP_LOGW(TAG, ">>> ALEV TESPIT EDILDI! <<<");
-                gpio_set_level(BUZZER_GPIO, 1); // Buzzer AÇIK
-                oled_draw_bitmap(fb_flame);      // Alev ikonu göster
-            } else {
-                // GÜVENLİ
-                ESP_LOGI(TAG, "Durum: Normal (Alev yok)");
-                gpio_set_level(BUZZER_GPIO, 0); // Buzzer KAPALI
-                oled_draw_bitmap(fb_safe);       // Güvenli ikonu göster
-            }
-            last_flame_val = flame_val;
-        }
-
-        vTaskDelay(500 / portTICK_PERIOD_MS);
+    // 8. Ağ: NVS + WiFi (STA) + SNTP + WebSocket/HTTP sunucu
+    //    (WiFi'ye bağlanınca sunucu on_wifi_event içinde otomatik başlar)
+    esp_err_t nvs_ret = nvs_flash_init();
+    if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
     }
+    wifi_init_sta();
+
+    ESP_LOGI(TAG, "Sistem Hazir. Izleme + WebSocket yayini basliyor...");
+
+    // 9. İzleme görevini başlat (alev algılama + buzzer + OLED + WS yayını)
+    //    cJSON + I2C kullandığı için yeterli stack veriyoruz.
+    xTaskCreate(monitor_task, "monitor", 6144, NULL, 5, NULL);
 }
